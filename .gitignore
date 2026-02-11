@@ -9,4 +9,4 @@ __pycache__/
 
 # Personal settings
 .env
-.vscode/
+.vscode/nfl_pbp_cache.csv
