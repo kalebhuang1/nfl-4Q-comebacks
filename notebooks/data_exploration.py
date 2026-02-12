@@ -1,4 +1,4 @@
-import nflreadpy as nfl  # Switched to nflreadpy
+import nflreadpy as nfl 
 import pandas as pd
 import os
 import matplotlib.pyplot as plt
@@ -12,6 +12,8 @@ from sklearn.calibration import CalibratedClassifierCV
 from sklearn.metrics import recall_score, precision_score, f1_score
 from sklearn.model_selection import RandomizedSearchCV
 
+import lightgbm as lgb
+from lightgbm import LGBMClassifier
 
 
 plt.style.use('Solarize_Light2')
@@ -25,8 +27,7 @@ def load_comeback_data(years=list(range(2015,2025))):
         'qtr', 'game_seconds_remaining', 'score_differential',
         'yardline_100', 'down', 'ydstogo',
         'posteam_timeouts_remaining', 'defteam_timeouts_remaining',
-        'spread_line', 'epa', 'wind', 'total_line',
-        'kick_distance', 'temp', 'goal_to_go', 'result'
+         'epa', 'wind', 'kick_distance', 'temp', 'goal_to_go', 'result'
     ]
 
     def _download_and_cache_full_pbp():
@@ -50,7 +51,6 @@ def load_comeback_data(years=list(range(2015,2025))):
     else:
         pbp = _download_and_cache_full_pbp()
 
-    # Enforce the modeling schema for both cached and freshly-downloaded data.
     missing_after_refresh = [c for c in columns if c not in pbp.columns]
     if missing_after_refresh:
         raise ValueError(
@@ -61,7 +61,7 @@ def load_comeback_data(years=list(range(2015,2025))):
 
     pbp = add_epa(pbp)
     pbp = add_home_team(pbp)
-    df = pbp[pbp['qtr'] == 4].copy()
+    df = pbp[pbp['qtr'] >= 4].copy()
 
     def determine_win(row):
         if row['posteam'] == row['home_team']:
@@ -71,18 +71,15 @@ def load_comeback_data(years=list(range(2015,2025))):
 
     df['won_game'] = df.apply(determine_win, axis=1)
 
-    comeback_df = df[(df['qtr'] >= 4) & (df['score_differential'] < 0) & (df['score_differential'] >= -8)].copy()
+    comeback_df = df[(df['score_differential'] < 0) & (df['score_differential'] >= -8)].copy()
     comeback_df = comeback_df.sort_values(['game_id', 'game_seconds_remaining'], ascending=[True, False])
 
-    # Build drive IDs from possession changes within each game.
     drive_start = comeback_df['posteam'] != comeback_df.groupby('game_id')['posteam'].shift(1)
     comeback_df['drive_id'] = drive_start.groupby(comeback_df['game_id']).cumsum()
 
-    # Keep only each team's final trailing drive in the game.
     last_drive = comeback_df.groupby(['game_id', 'posteam'])['drive_id'].transform('max')
     comeback_df = comeback_df[comeback_df['drive_id'] == last_drive]
 
-    # Keep only the first play of that drive (most time remaining).
     comeback_df = (
         comeback_df.sort_values(['game_id', 'posteam', 'game_seconds_remaining'], ascending=[True, True, False])
         .groupby(['game_id', 'posteam'], as_index=False)
@@ -153,7 +150,7 @@ def prep_train_data(df):
     
     return X_train, X_test, y_train, y_test, X_val, y_val
 
-def rf_model(X_train, X_test, y_train, y_test, X_val, y_val):
+def train_rf_model(X_train, X_test, y_train, y_test, X_val, y_val):
     rf_base = RandomForestClassifier(
         random_state=42
     )
@@ -180,10 +177,10 @@ def rf_model(X_train, X_test, y_train, y_test, X_val, y_val):
     print("Best Params:", search.best_params_)
 
     best_rf = search.best_estimator_
-    rf_model = CalibratedClassifierCV(best_rf, method='sigmoid', cv=5)
-    rf_model.fit(X_train, y_train)
+    calibrated_rf = CalibratedClassifierCV(best_rf, method='sigmoid', cv=5)
+    calibrated_rf.fit(X_train, y_train)
     
-    val_probs = rf_model.predict_proba(X_val)[:,1]
+    val_probs = calibrated_rf.predict_proba(X_val)[:,1]
     thresholds = np.arange(0.05, 0.98, 0.02)
     best_t = 0.2
     best_r = -1
@@ -204,15 +201,75 @@ def rf_model(X_train, X_test, y_train, y_test, X_val, y_val):
     print("Best Precision: " + str(best_p))
     print("Best F1-Score: " + str(best_f1))
 
-    test_probs = rf_model.predict_proba(X_test)[:,1]
+    test_probs = calibrated_rf.predict_proba(X_test)[:,1]
     predictions = (test_probs >= best_t).astype(int)
     acc = accuracy_score(y_test, predictions)
     print(f'Model Accuracy: {acc:.2%}') 
     print(classification_report(y_test, predictions))
-    return rf_model, best_t
+    return calibrated_rf, best_t
 
-def plot_confusion_matrix(rf_model, X_test, y_test, threshold):
-    test_probs = rf_model.predict_proba(X_test)[:,1]
+def train_lightgbm_model(X_train, X_test, y_train, y_test, X_val, y_val):
+
+    lightgbm_base = LGBMClassifier(objective = 'binary', random_state=42, verbose = -1)
+    rs_params={
+        "n_estimators": [100, 200, 300, 500],   
+        "learning_rate": [0.01, 0.05, 0.1, 0.2],
+        "num_leaves": [15, 31, 63],
+        "max_depth": [-1, 4, 6, 8],
+        "subsample": [0.6, 0.8, 1.0],           
+        "colsample_bytree": [0.6, 0.8, 1.0],   
+        "min_child_samples": [10, 20, 40]
+    }
+    search = RandomizedSearchCV(
+        estimator = lightgbm_base,
+        param_distributions= rs_params,
+        n_iter = 40,
+        scoring = 'f1',
+        cv = 5,
+        random_state=42,
+        n_jobs = 1,
+        verbose = 1
+    )
+    search.fit(X_train, y_train)
+    print("Best CV F1:", search.best_score_)
+    print("Best Params:", search.best_params_)
+    best_lgbm = search.best_estimator_
+    calibrated_rf = CalibratedClassifierCV(best_lgbm, method='sigmoid', cv=5)
+    calibrated_rf.fit(X_train, y_train)
+
+    val_probs = calibrated_rf.predict_proba(X_val)[:,1]
+    thresholds = np.arange(0.05, 0.98, 0.02)
+    best_t = 0.2
+    best_r = -1
+    best_p = 0
+    best_f1 = 0
+    for t in thresholds:
+        preds = (val_probs >= t).astype(int)
+        r = recall_score(y_val, preds)
+        p = precision_score(y_val, preds, zero_division = 0)
+        f = f1_score(y_val, preds)
+        if f>best_f1:
+            best_r = r
+            best_p = p
+            best_t = t
+            best_f1 = f
+    print("Best Threshold: " + str(best_t))
+    print("Best Recall: " + str(best_r))
+    print("Best Precision: " + str(best_p))
+    print("Best F1-Score: " + str(best_f1))
+
+    test_probs = calibrated_rf.predict_proba(X_test)[:,1]
+    predictions = (test_probs >= best_t).astype(int)
+    acc = accuracy_score(y_test, predictions)
+    print(f'Model Accuracy: {acc:.2%}') 
+    print(classification_report(y_test, predictions))
+    return calibrated_rf, best_t
+
+
+
+
+def plot_confusion_matrix(calibrated_rf, X_test, y_test, threshold):
+    test_probs = calibrated_rf.predict_proba(X_test)[:,1]
     preds = (test_probs >= threshold).astype(int)
     cm = confusion_matrix(y_test, preds)
     disp = ConfusionMatrixDisplay(confusion_matrix=cm, display_labels=['Loss', 'Win'])
@@ -223,25 +280,33 @@ def plot_confusion_matrix(rf_model, X_test, y_test, threshold):
 def plot_smart_importance(calibrated_model, X_train):
     importances_list = []
 
-    for clf in calibrated_model.calibrated_classifiers_:
+    if hasattr(calibrated_model, 'calibrated_classifiers_'):
+        estimators = [clf.estimator for clf in calibrated_model.calibrated_classifiers_]
+    else:
+        estimators = [calibrated_model]
 
-        est = clf.estimator 
-        
-        if isinstance(est, Pipeline):
-            importances_list.append(est.named_steps['clf'].feature_importances_)
-        else:
+    for est in estimators:
+        if hasattr(est, 'feature_importances_'):
             importances_list.append(est.feature_importances_)
+
+    if not importances_list:
+        raise ValueError("No feature_importances_ found on the fitted estimator(s).")
+
     all_importances = np.array(importances_list)
     importances = np.mean(all_importances, axis=0)
     std = np.std(all_importances, axis=0)
-    indices = np.argsort(importances)[::-1]
     feature_names = X_train.columns
+    if len(importances) != len(feature_names):
+        raise ValueError(
+            f"Feature importance length ({len(importances)}) does not match number of features ({len(feature_names)})."
+        )
+    indices = np.argsort(importances)[::-1]
     plt.figure(figsize=(12, 7))
     plt.title("Universal Feature Importance (Averaged Over Folds)")
-    plt.bar(range(X_train.shape[1]), importances[indices], 
+    plt.bar(range(len(feature_names)), importances[indices], 
             color="skyblue", yerr=std[indices], align="center", capsize=5)
     
-    plt.xticks(range(X_train.shape[1]), [feature_names[i] for i in indices], rotation=45)
+    plt.xticks(range(len(feature_names)), [feature_names[i] for i in indices], rotation=45)
     plt.ylabel("Importance Score")
     plt.tight_layout()
     plt.savefig("results/plots/feature_importance_universal.png")
@@ -251,7 +316,7 @@ df = load_comeback_data()
 plot_win_probability_groups(df)
 
 X_train, X_test, y_train, y_test, X_val, y_val = prep_train_data(df)
-rf_model, best_t = rf_model(X_train, X_test, y_train, y_test, X_val, y_val)
+calibrated_rf, best_t = train_lightgbm_model(X_train, X_test, y_train, y_test, X_val, y_val)
 
-plot_confusion_matrix(rf_model, X_test, y_test, best_t)
-plot_smart_importance(rf_model, X_train)
+plot_confusion_matrix(calibrated_rf, X_test, y_test, best_t)
+plot_smart_importance(calibrated_rf, X_train)
