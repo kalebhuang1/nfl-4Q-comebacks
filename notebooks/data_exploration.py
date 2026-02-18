@@ -10,24 +10,27 @@ from sklearn.ensemble import RandomForestClassifier
 from sklearn.metrics import accuracy_score, classification_report, confusion_matrix, ConfusionMatrixDisplay
 from sklearn.calibration import CalibratedClassifierCV
 from sklearn.metrics import recall_score, precision_score, f1_score
-from sklearn.model_selection import RandomizedSearchCV
+from sklearn.model_selection import GroupKFold, RandomizedSearchCV
 
 import lightgbm as lgb
 from lightgbm import LGBMClassifier
+from sklearn import set_config
+set_config(enable_metadata_routing=True)
 
 
 plt.style.use('Solarize_Light2')
 ssl._create_default_https_context = ssl._create_unverified_context
 
 def load_comeback_data(years=list(range(2015,2025))):
-    cache_file = "nfl_pbp_cache.csv"
+    years_key = "-".join(map(str, sorted(years)))
+    cache_file = f"nfl_pbp_cache_{years_key}.csv"
     
     columns = [
-        'game_id', 'season', 'home_team', 'away_team', 'posteam', 'defteam',
-        'qtr', 'game_seconds_remaining', 'score_differential',
-        'yardline_100', 'down', 'ydstogo',
+        'game_id','qtr', 'home_team', 'away_team', 'posteam', 'defteam','game_seconds_remaining', 'score_differential',
+        'yardline_100', 'down', 'ydstogo', 'temp', 'goal_to_go',
         'posteam_timeouts_remaining', 'defteam_timeouts_remaining',
-         'epa', 'wind', 'kick_distance', 'temp', 'goal_to_go', 'result'
+         'epa', 'wind', 'kick_distance', 'qb_epa', 'posteam_score', 'defteam_score', 'total_home_comp_air_epa', 'total_away_comp_air_epa',
+         'div_game', 'result'
     ]
 
     def _download_and_cache_full_pbp():
@@ -61,6 +64,8 @@ def load_comeback_data(years=list(range(2015,2025))):
 
     pbp = add_epa(pbp)
     pbp = add_home_team(pbp)
+    pbp = add_qb_epa(pbp)
+
     df = pbp[pbp['qtr'] >= 4].copy()
 
     def determine_win(row):
@@ -110,6 +115,19 @@ def add_epa(df):
         0.0
     )
     return df
+def add_qb_epa(df):
+    df = df.sort_values(['game_id', 'game_seconds_remaining'], ascending=[True, False], kind='mergesort').copy()
+
+    off_group = df.groupby(['game_id', 'posteam'])['qb_epa']
+    off_cumsum = off_group.cumsum()
+    off_count_prior = off_group.cumcount()
+    df['qb_epa_prior'] = np.where(
+        off_count_prior > 0,
+        (off_cumsum - df['qb_epa']) / off_count_prior,
+        0.0
+    )
+
+    return df
 
 def add_home_team(df):
     df['is_home'] = (df['posteam'] == df['home_team']).astype(int)
@@ -136,21 +154,24 @@ def prep_train_data(df):
     train_df = df[df['game_id'].isin(train_games)].copy()
     test_df = df[df['game_id'].isin(test_games)].copy()
     val_df   = df[df["game_id"].isin(val_games)].copy()
+    train_games = train_df['game_id'].copy()
 
     string_columns = train_df.select_dtypes(include=['object']).columns
     train_df = train_df.drop(columns = string_columns)
     test_df = test_df.drop(columns = string_columns)
     val_df = val_df.drop(columns = string_columns)
-    X_train = train_df.drop(columns = ['won_game', 'result', 'epa']).fillna(0)
+    X_train = train_df.drop(columns = ['won_game', 'result', 'epa', 'qb_epa']).fillna(0)
     y_train = train_df['won_game']
-    X_test = test_df.drop(columns = ['won_game', 'result', 'epa']).fillna(0)
+    X_test = test_df.drop(columns = ['won_game', 'result', 'epa', 'qb_epa']).fillna(0)
     y_test = test_df['won_game']
-    X_val = val_df.drop(columns = ['won_game', 'result', 'epa']).fillna(0)
+    X_val = val_df.drop(columns = ['won_game', 'result', 'epa', 'qb_epa']).fillna(0)
     y_val = val_df["won_game"]
-    
-    return X_train, X_test, y_train, y_test, X_val, y_val
 
-def train_rf_model(X_train, X_test, y_train, y_test, X_val, y_val):
+    
+    
+    return X_train, X_test, y_train, y_test, X_val, y_val, train_games
+
+def train_rf_model(X_train, X_test, y_train, y_test, X_val, y_val, train_groups):
     rf_base = RandomForestClassifier(
         random_state=42
     )
@@ -162,23 +183,24 @@ def train_rf_model(X_train, X_test, y_train, y_test, X_val, y_val):
         "max_features": ["sqrt", "log2", 0.5, 0.7],
         "class_weight": [None, "balanced", "balanced_subsample"]
     }
+    gkf = GroupKFold(n_splits=5)
     search = RandomizedSearchCV(
         estimator = rf_base,
         param_distributions= search_space,
         n_iter = 40,
         scoring = 'f1',
-        cv = 5,
+        cv = gkf,
         random_state=42,
         n_jobs = 1,
         verbose = 1
     )
-    search.fit(X_train, y_train)
+    search.fit(X_train, y_train, groups=train_groups)
     print("Best CV F1:", search.best_score_)
     print("Best Params:", search.best_params_)
 
     best_rf = search.best_estimator_
-    calibrated_rf = CalibratedClassifierCV(best_rf, method='sigmoid', cv=5)
-    calibrated_rf.fit(X_train, y_train)
+    calibrated_rf = CalibratedClassifierCV(best_rf, method='sigmoid', cv=gkf)
+    calibrated_rf.fit(X_train, y_train, groups=train_groups)
     
     val_probs = calibrated_rf.predict_proba(X_val)[:,1]
     thresholds = np.arange(0.05, 0.98, 0.02)
@@ -208,7 +230,7 @@ def train_rf_model(X_train, X_test, y_train, y_test, X_val, y_val):
     print(classification_report(y_test, predictions))
     return calibrated_rf, best_t
 
-def train_lightgbm_model(X_train, X_test, y_train, y_test, X_val, y_val):
+def train_lightgbm_model(X_train, X_test, y_train, y_test, X_val, y_val, train_groups):
 
     lightgbm_base = LGBMClassifier(objective = 'binary', random_state=42, verbose = -1)
     rs_params={
@@ -220,22 +242,25 @@ def train_lightgbm_model(X_train, X_test, y_train, y_test, X_val, y_val):
         "colsample_bytree": [0.6, 0.8, 1.0],   
         "min_child_samples": [10, 20, 40]
     }
+    gkf = GroupKFold(n_splits=5)
     search = RandomizedSearchCV(
         estimator = lightgbm_base,
         param_distributions= rs_params,
         n_iter = 40,
         scoring = 'f1',
-        cv = 5,
+        cv = gkf,
         random_state=42,
         n_jobs = 1,
         verbose = 1
     )
-    search.fit(X_train, y_train)
+    search.fit(X_train, y_train, groups = train_groups)
     print("Best CV F1:", search.best_score_)
     print("Best Params:", search.best_params_)
     best_lgbm = search.best_estimator_
-    calibrated_rf = CalibratedClassifierCV(best_lgbm, method='sigmoid', cv=5)
-    calibrated_rf.fit(X_train, y_train)
+
+    
+    calibrated_rf = CalibratedClassifierCV(best_lgbm, method='sigmoid', cv=gkf)
+    calibrated_rf.fit(X_train, y_train, groups = train_groups)
 
     val_probs = calibrated_rf.predict_proba(X_val)[:,1]
     thresholds = np.arange(0.05, 0.98, 0.02)
@@ -315,8 +340,8 @@ def plot_smart_importance(calibrated_model, X_train):
 df = load_comeback_data()
 plot_win_probability_groups(df)
 
-X_train, X_test, y_train, y_test, X_val, y_val = prep_train_data(df)
-calibrated_rf, best_t = train_lightgbm_model(X_train, X_test, y_train, y_test, X_val, y_val)
+X_train, X_test, y_train, y_test, X_val, y_val, train_groups = prep_train_data(df)
+calibrated_lgbm, best_t = train_lightgbm_model(X_train, X_test, y_train, y_test, X_val, y_val, train_groups)
 
-plot_confusion_matrix(calibrated_rf, X_test, y_test, best_t)
-plot_smart_importance(calibrated_rf, X_train)
+plot_confusion_matrix(calibrated_lgbm, X_test, y_test, best_t)
+plot_smart_importance(calibrated_lgbm, X_train)
