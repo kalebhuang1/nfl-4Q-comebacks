@@ -30,7 +30,7 @@ def load_comeback_data(years=list(range(2015,2025))):
         'yardline_100', 'down', 'ydstogo', 'temp', 'goal_to_go',
         'posteam_timeouts_remaining', 'defteam_timeouts_remaining',
          'epa', 'wind', 'kick_distance', 'qb_epa', 'posteam_score', 'defteam_score', 'total_home_comp_air_epa', 'total_away_comp_air_epa',
-         'div_game', 'result'
+         'div_game', 'result', 'season', 'drive', 'drive_play_count'
     ]
 
     def _download_and_cache_full_pbp():
@@ -65,6 +65,7 @@ def load_comeback_data(years=list(range(2015,2025))):
     pbp = add_epa(pbp)
     pbp = add_home_team(pbp)
     pbp = add_qb_epa(pbp)
+    pbp = add_avg_drive_play_count(pbp)
 
     df = pbp[pbp['qtr'] >= 4].copy()
 
@@ -84,13 +85,15 @@ def load_comeback_data(years=list(range(2015,2025))):
 
     last_drive = comeback_df.groupby(['game_id', 'posteam'])['drive_id'].transform('max')
     comeback_df = comeback_df[comeback_df['drive_id'] == last_drive]
-
+   
     comeback_df = (
         comeback_df.sort_values(['game_id', 'posteam', 'game_seconds_remaining'], ascending=[True, True, False])
         .groupby(['game_id', 'posteam'], as_index=False)
         .head(1)
         .drop(columns=['drive_id'])
     )
+    print("after head(1) per team:", comeback_df.shape)
+    print(comeback_df.groupby("game_id").size().value_counts().sort_index().head(10))
 
     return comeback_df
 
@@ -133,6 +136,27 @@ def add_home_team(df):
     df['is_home'] = (df['posteam'] == df['home_team']).astype(int)
     return df
 
+def add_avg_drive_play_count(df):
+    drive_df = (
+        df.sort_values(['game_id', 'posteam', 'drive', 'game_seconds_remaining'], ascending=[True, True, True, False])
+        .drop_duplicates(subset=['game_id', 'posteam', 'drive'])[['game_id', 'posteam', 'drive', 'drive_play_count']]
+    )
+    drive_df = drive_df.sort_values(['game_id', 'posteam', 'drive']).copy()
+
+    grp = drive_df.groupby(['game_id', 'posteam'])['drive_play_count']
+    cumsum = grp.cumsum()
+    count_prior = grp.cumcount()
+
+    drive_df['off_avg_drive_play_count_prior'] = np.where(count_prior > 0,(cumsum - drive_df['drive_play_count']) / count_prior, 0.0)
+    df = df.merge(
+    drive_df[['game_id', 'posteam', 'drive', 'off_avg_drive_play_count_prior']],
+    on=['game_id', 'posteam', 'drive'],
+    how='left'
+)
+
+    df['off_avg_drive_play_count_prior'] = df['off_avg_drive_play_count_prior'].fillna(0.0)
+    return df
+
 def plot_win_probability_groups(df):
     win_rate_groups = df.groupby('score_differential')['won_game'].mean().reset_index().rename(columns = {'won_game': 'win_percent'})
     x = win_rate_groups['score_differential']
@@ -147,29 +171,26 @@ def plot_win_probability_groups(df):
     plt.savefig("results/plots/01_win_rate_by_points_down.png")
 
 def prep_train_data(df):
-    unique_games = df['game_id'].unique()
-    train_games, temp_games = train_test_split(unique_games, test_size=0.4, random_state=42)
-    val_games, test_games = train_test_split(temp_games, test_size = 0.5, random_state= 42)
-    
-    train_df = df[df['game_id'].isin(train_games)].copy()
-    test_df = df[df['game_id'].isin(test_games)].copy()
-    val_df   = df[df["game_id"].isin(val_games)].copy()
-    train_games = train_df['game_id'].copy()
+    train_df = df[df['season'] <= 2021].copy()
+    val_df   = df[(df["season"] >= 2022) & (df["season"] <= 2023)].copy()
+    test_df  = df[df["season"] == 2024].copy()
+
+    train_groups = train_df['game_id'].copy()
 
     string_columns = train_df.select_dtypes(include=['object']).columns
-    train_df = train_df.drop(columns = string_columns)
-    test_df = test_df.drop(columns = string_columns)
-    val_df = val_df.drop(columns = string_columns)
-    X_train = train_df.drop(columns = ['won_game', 'result', 'epa', 'qb_epa']).fillna(0)
-    y_train = train_df['won_game']
-    X_test = test_df.drop(columns = ['won_game', 'result', 'epa', 'qb_epa']).fillna(0)
-    y_test = test_df['won_game']
-    X_val = val_df.drop(columns = ['won_game', 'result', 'epa', 'qb_epa']).fillna(0)
-    y_val = val_df["won_game"]
+    train_df = train_df.drop(columns=string_columns)
+    test_df  = test_df.drop(columns=string_columns)
+    val_df   = val_df.drop(columns=string_columns)
 
-    
-    
-    return X_train, X_test, y_train, y_test, X_val, y_val, train_games
+    X_train = train_df.drop(columns=['won_game', 'result', 'epa', 'qb_epa','season', 'drive', 'drive_play_count']).fillna(0)
+    y_train = train_df['won_game']
+    X_test  = test_df.drop(columns=['won_game', 'result', 'epa', 'qb_epa','season', 'drive', 'drive_play_count']).fillna(0)
+    y_test  = test_df['won_game']
+    X_val   = val_df.drop(columns=['won_game', 'result', 'epa', 'qb_epa','season', 'drive', 'drive_play_count']).fillna(0)
+    y_val   = val_df['won_game']
+
+    return X_train, X_test, y_train, y_test, X_val, y_val, train_groups
+
 
 def train_rf_model(X_train, X_test, y_train, y_test, X_val, y_val, train_groups):
     rf_base = RandomForestClassifier(
@@ -234,19 +255,23 @@ def train_lightgbm_model(X_train, X_test, y_train, y_test, X_val, y_val, train_g
 
     lightgbm_base = LGBMClassifier(objective = 'binary', random_state=42, verbose = -1)
     rs_params={
-        "n_estimators": [100, 200, 300, 500],   
-        "learning_rate": [0.01, 0.05, 0.1, 0.2],
-        "num_leaves": [15, 31, 63],
-        "max_depth": [-1, 4, 6, 8],
-        "subsample": [0.6, 0.8, 1.0],           
-        "colsample_bytree": [0.6, 0.8, 1.0],   
-        "min_child_samples": [10, 20, 40]
+        "n_estimators": [80, 120, 180, 240],
+        "learning_rate": [0.01, 0.03, 0.05, 0.08],
+        "num_leaves": [7, 15, 31],
+        "max_depth": [3, 4, 5, 6],
+        "min_child_samples": [30, 50, 80, 120],
+        "subsample": [0.7, 0.85, 1.0],
+        "colsample_bytree": [0.6, 0.8, 1.0],
+        "reg_alpha": [0.0, 0.5, 1.0, 2.0, 5.0],
+        "reg_lambda": [1.0, 2.0, 5.0, 10.0]
+
+
     }
     gkf = GroupKFold(n_splits=5)
     search = RandomizedSearchCV(
         estimator = lightgbm_base,
         param_distributions= rs_params,
-        n_iter = 40,
+        n_iter = 25,
         scoring = 'f1',
         cv = gkf,
         random_state=42,
@@ -268,12 +293,13 @@ def train_lightgbm_model(X_train, X_test, y_train, y_test, X_val, y_val, train_g
     best_r = -1
     best_p = 0
     best_f1 = 0
+    precision_floor = 0.45
     for t in thresholds:
         preds = (val_probs >= t).astype(int)
         r = recall_score(y_val, preds)
         p = precision_score(y_val, preds, zero_division = 0)
         f = f1_score(y_val, preds)
-        if f>best_f1:
+        if (f>best_f1) & (p>precision_floor):
             best_r = r
             best_p = p
             best_t = t
@@ -345,3 +371,17 @@ calibrated_lgbm, best_t = train_lightgbm_model(X_train, X_test, y_train, y_test,
 
 plot_confusion_matrix(calibrated_lgbm, X_test, y_test, best_t)
 plot_smart_importance(calibrated_lgbm, X_train)
+
+train_probs = calibrated_lgbm.predict_proba(X_train)[:, 1]
+train_preds = (train_probs >= best_t).astype(int)
+
+print(classification_report(y_train, train_preds))
+
+val_probs = calibrated_lgbm.predict_proba(X_val)[:,1]
+val_preds = (val_probs>=best_t).astype(int)
+
+print(classification_report(y_val, val_preds))
+
+
+
+
