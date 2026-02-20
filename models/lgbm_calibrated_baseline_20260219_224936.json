@@ -1,0 +1,24 @@
+{
+  "saved_at": "20260219_224936",
+  "model_name": "lgbm_calibrated_baseline",
+  "threshold": 0.31000000000000005,
+  "feature_names": [
+    "game_seconds_remaining",
+    "score_differential",
+    "yardline_100",
+    "down",
+    "ydstogo",
+    "temp",
+    "defteam_timeouts_remaining",
+    "posteam_timeouts_remaining",
+    "wind",
+    "kick_distance",
+    "posteam_score",
+    "defteam_score",
+    "off_epa_game_prior",
+    "def_epa_game_prior",
+    "is_home",
+    "qb_epa_prior",
+    "off_avg_drive_play_count_prior"
+  ]
+}

@@ -1,0 +1,105 @@
+{
+  "saved_at": "20260219_230018",
+  "model_name": "lgbm_calibrated_baseline",
+  "threshold": 0.29000000000000004,
+  "feature_names": [
+    "game_seconds_remaining",
+    "score_differential",
+    "yardline_100",
+    "down",
+    "ydstogo",
+    "defteam_timeouts_remaining",
+    "posteam_timeouts_remaining",
+    "kick_distance",
+    "posteam_score",
+    "defteam_score",
+    "off_epa_game_prior",
+    "def_epa_game_prior",
+    "is_home",
+    "qb_epa_prior",
+    "off_avg_drive_play_count_prior"
+  ],
+  "classification_reports": {
+    "train": {
+      "0": {
+        "precision": 0.896969696969697,
+        "recall": 0.7708333333333334,
+        "f1-score": 0.8291316526610645,
+        "support": 1152.0
+      },
+      "1": {
+        "precision": 0.5714285714285714,
+        "recall": 0.775330396475771,
+        "f1-score": 0.6579439252336449,
+        "support": 454.0
+      },
+      "accuracy": 0.772104607721046,
+      "macro avg": {
+        "precision": 0.7341991341991342,
+        "recall": 0.7730818649045521,
+        "f1-score": 0.7435377889473547,
+        "support": 1606.0
+      },
+      "weighted avg": {
+        "precision": 0.8049425045689055,
+        "recall": 0.772104607721046,
+        "f1-score": 0.7807386089175723,
+        "support": 1606.0
+      }
+    },
+    "val": {
+      "0": {
+        "precision": 0.7845659163987139,
+        "recall": 0.6971428571428572,
+        "f1-score": 0.7382753403933434,
+        "support": 350.0
+      },
+      "1": {
+        "precision": 0.45077720207253885,
+        "recall": 0.564935064935065,
+        "f1-score": 0.5014409221902018,
+        "support": 154.0
+      },
+      "accuracy": 0.6567460317460317,
+      "macro avg": {
+        "precision": 0.6176715592356263,
+        "recall": 0.6310389610389611,
+        "f1-score": 0.6198581312917726,
+        "support": 504.0
+      },
+      "weighted avg": {
+        "precision": 0.6825749203546049,
+        "recall": 0.6567460317460317,
+        "f1-score": 0.6659092681646057,
+        "support": 504.0
+      }
+    },
+    "test": {
+      "0": {
+        "precision": 0.8285714285714286,
+        "recall": 0.6628571428571428,
+        "f1-score": 0.7365079365079366,
+        "support": 175.0
+      },
+      "1": {
+        "precision": 0.42718446601941745,
+        "recall": 0.6470588235294118,
+        "f1-score": 0.5146198830409356,
+        "support": 68.0
+      },
+      "accuracy": 0.6584362139917695,
+      "macro avg": {
+        "precision": 0.627877947295423,
+        "recall": 0.6549579831932772,
+        "f1-score": 0.6255639097744361,
+        "support": 243.0
+      },
+      "weighted avg": {
+        "precision": 0.7162491509848575,
+        "recall": 0.6584362139917695,
+        "f1-score": 0.6744158063196399,
+        "support": 243.0
+      }
+    }
+  }
+}
